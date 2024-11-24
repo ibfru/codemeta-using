@@ -1,0 +1,459 @@
+
+// repoConfig is a configuration struct for a organization and repository.
+// It includes a RepoFilter and a boolean value indicating if an issue can be closed only when its linking PR exists.
+type repoConfig struct {
+	// RepoFilter is used to filter repositories.
+	config.RepoFilter
+	// true: issue can be closed only when its linking PR exists
+	// false: issue can be directly closed
+	NeedIssueHasLinkPullRequests bool `json:"need_issue_has_link_pull_requests,omitempty"`
+}
+
+// validate to check the repoConfig data's validation
+// Returns an error if invalid
+func (c *repoConfig) validate() error {
+	// If the bot is not configured to monitor any repositories, return an error.
+	if len(c.Repos) == 0 {
+		return errors.New("the repositories configuration can not be empty")
+	}
+
+	return c.RepoFilter.Validate()
+}
+
+// configuration holds a list of repoConfig configurations.
+// It also  includes sig information url, community name, event states, comment templates.
+type configuration struct {
+	ConfigItems []repoConfig `json:"config_items,omitempty"`
+	// Sig information url.
+	SigInfoURL string `json:"sig_info_url" required:"true"`
+	// Community name used as a request parameter to get sig information.
+	CommunityName string `json:"community_name" required:"true"`
+	// Event state for opened issues.
+	EventStateOpened string `json:"event_state_opened" required:"true"`
+	// Event state for closed issues.
+	EventStateClosed string `json:"event_state_closed" required:"true"`
+	// Comment template for when no permission to operate on an issue.
+	CommentNoPermissionOperateIssue string `json:"comment_no_permission_operate_issue"  required:"true"`
+	// Comment template indicating that an issue needs a linking PR.
+	CommentIssueNeedsLinkPR string `json:"comment_issue_needs_link_pr"  required:"true"`
+	// Comment template for listing linking pull requests that failed.
+	CommentListLinkingPullRequestsFailure string `json:"comment_list_linking_pull_requests_failure"  required:"true"`
+	// Comment template for when no permission to operate on a PR.
+	CommentNoPermissionOperatePR string `json:"comment_no_permission_operate_pr"  required:"true"`
+}
+
+// Validate to check the configmap data's validation.
+// Returns an error if invalid.
+func (c *configuration) Validate() error {
+	if c == nil {
+		return errors.New("configuration is nil")
+	}
+
+	// Validate each repo configuration
+	items := c.ConfigItems
+	for i := range items {
+		if err := items[i].validate(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// get retrieves a repoConfig for a given organization and repository.
+// Returns the repoConfig if found, otherwise returns nil.
+func (c *configuration) get(org, repo string) *repoConfig {
+	if c == nil || len(c.ConfigItems) == 0 {
+		return nil
+	}
+
+	for i := range c.ConfigItems {
+		ok, _ := c.ConfigItems[i].RepoFilter.CanApply(org, org+"/"+repo)
+		if ok {
+			return &c.ConfigItems[i]
+		}
+	}
+
+	return nil
+}
+
+// NeedLinkPullRequests checks if the link to the pull request is needed for a given organization and repository.
+// Returns true if the link to the pull request is needed, false otherwise.
+func (c *configuration) NeedLinkPullRequests(org, repo string) bool {
+	cnf := c.get(org, repo)
+	if cnf != nil {
+		return cnf.NeedIssueHasLinkPullRequests
+	}
+
+	return false
+}
+
+
+======================================
+
+
+func TestRepoConfigValidate(t *testing.T) {
+	// 测试空的Repos字段
+	rc := &repoConfig{}
+	err := rc.validate()
+	if err == nil {
+		t.Error("Expected an error for empty Repos field, but got nil")
+	}
+
+	// 测试非空的Repos字段
+	rc.Repos = []string{"repo1", "repo2"}
+	err = rc.validate()
+	if err != nil {
+		t.Errorf("Expected no error for non-empty Repos field, but got %v", err)
+	}
+}
+
+func TestConfigurationValidate(t *testing.T) {
+	// 测试空的配置
+	c := &configuration{}
+	err := c.Validate()
+	if err == nil {
+		t.Error("Expected an error for nil configuration, but got nil")
+	}
+
+	// 测试非空的配置
+	c.ConfigItems = []repoConfig{
+		{
+			RepoFilter: config.RepoFilter{
+				Repos: []string{"repo1", "repo2"},
+			},
+		},
+	}
+	err = c.Validate()
+	if err != nil {
+		t.Errorf("Expected no error for non-nil configuration, but got %v", err)
+	}
+}
+
+func TestConfigurationGet(t *testing.T) {
+	// 测试空的配置
+	c := &configuration{}
+	rc := c.get("org1", "repo1")
+	if rc != nil {
+		t.Error("Expected nil repoConfig for empty configuration, but got non-nil")
+	}
+
+	// 测试非空的配置，但不匹配的组织和仓库
+	c.ConfigItems = []repoConfig{
+		{
+			RepoFilter: config.RepoFilter{
+				Repos: []string{"repo1", "repo2"},
+			},
+		},
+	}
+	rc = c.get("org2", "repo3")
+	if rc != nil {
+		t.Error("Expected nil repoConfig for non-matching organization and repository, but got non-nil")
+	}
+
+	// 测试非空的配置，匹配的组织和仓库
+	rc = c.get("org1", "repo1")
+	if rc == nil {
+		t.Error("Expected non-nil repoConfig for matching organization and repository, but got nil")
+	}
+}
+
+func TestConfigurationNeedLinkPullRequests(t *testing.T) {
+	// 测试空的配置
+	c := &configuration{}
+	needLink := c.NeedLinkPullRequests("org1", "repo1")
+	if needLink {
+		t.Error("Expected false for needing link to pull request for empty configuration, but got true")
+	}
+
+	// 测试非空的配置，但不匹配的组织和仓库
+	c.ConfigItems = []repoConfig{
+		{
+			RepoFilter: config.RepoFilter{
+				Repos: []string{"repo1", "repo2"},
+			},
+		},
+	}
+	needLink = c.NeedLinkPullRequests("org2", "repo3")
+	if needLink {
+		t.Error("Expected false for needing link to pull request for non-matching organization and repository, but got true")
+	}
+
+	// 测试非空的配置，匹配的组织和仓库，但NeedIssueHasLinkPullRequests为false
+	c.ConfigItems[0].NeedIssueHasLinkPullRequests = false
+	needLink = c.NeedLinkPullRequests("org1", "repo1")
+	if needLink {
+		t.Error("Expected false for needing link to pull request when NeedIssueHasLinkPullRequests is false, but got true")
+	}
+
+	// 测试非空的配置，匹配的组织和仓库，NeedIssueHasLinkPullRequests为true
+	c.ConfigItems[0].NeedIssueHasLinkPullRequests = true
+	needLink = c.NeedLinkPullRequests("org1", "repo1")
+	if !needLink {
+		t.Error("Expected true for needing link to pull request when NeedIssueHasLinkPullRequests is true, but got false")
+	}
+}
+
+
+=======================================
+
+
+
+type robotOptions struct {
+	service   config.FrameworkOptions
+	delToken  bool
+	interrupt bool
+	tokenPath string
+}
+
+func (o *robotOptions) loadToken(fs *flag.FlagSet) func() []byte {
+	fs.StringVar(
+		&o.tokenPath, "token-path", "",
+		"Path to the file containing the token secret.",
+	)
+	fs.BoolVar(
+		&o.delToken, "del-token", true,
+		"An flag to delete token secret file.",
+	)
+
+	return func() []byte {
+		token, err := secret.LoadSingleSecret(o.tokenPath)
+		if err != nil {
+			logrus.WithError(err).Fatal("fatal error occurred while loading token")
+			o.interrupt = true
+		}
+		if o.delToken {
+			if err = os.Remove(o.tokenPath); err != nil {
+				logrus.WithError(err).Fatal("fatal error occurred while deleting token")
+				o.interrupt = true
+			}
+		}
+		return token
+	}
+}
+
+// gatherOptions gather the necessary arguments from command line for project startup.
+// It returns the configuration and the token to using for subsequent processes.
+func (o *robotOptions) gatherOptions(fs *flag.FlagSet, args ...string) (*configuration, []byte) {
+
+	o.service.AddFlagsComposite(fs)
+	tokenFunc := o.loadToken(fs)
+
+	_ = fs.Parse(args)
+
+	if err := o.service.ValidateComposite(); err != nil {
+		logrus.Errorf("invalid service options, err:%s", err.Error())
+		o.interrupt = true
+		return nil, nil
+	}
+	configmap, err := config.NewConfigmapAgent(&configuration{}, o.service.ConfigFile)
+	if err != nil {
+		logrus.Errorf("load config, err:%s", err.Error())
+		return nil, nil
+	}
+
+	cnf := configmap.GetConfigmap().(*configuration)
+	client.SetSigInfoBaseURL(cnf.SigInfoURL)
+	client.SetCommunityName(cnf.CommunityName)
+	commentNoPermissionOperateIssue = cnf.CommentNoPermissionOperateIssue
+	commentIssueNeedsLinkPR = cnf.CommentIssueNeedsLinkPR
+	commentListLinkingPullRequestsFailure = cnf.CommentListLinkingPullRequestsFailure
+	commentNoPermissionOperatePR = cnf.CommentNoPermissionOperatePR
+
+	return cnf, tokenFunc()
+}
+
+
+=================================
+
+
+
+// iClient is an interface that defines methods for client-side interactions
+type iClient interface {
+	// CreatePRComment creates a comment for a pull request in a specified organization and repository
+	CreatePRComment(org, repo, number, comment string) (success bool)
+	// CreateIssueComment creates a comment for an issue in a specified organization and repository
+	CreateIssueComment(org, repo, number, comment string) (success bool)
+	// CheckPermission checks the permission of a user for a specified repository
+	CheckPermission(org, repo, username string) (pass, success bool)
+	// UpdateIssue updates the state of an issue in a specified organization and repository
+	UpdateIssue(org, repo, number, state string) (success bool)
+	// UpdatePR updates the state of a pull request in a specified organization and repository
+	UpdatePR(org, repo, number, state string) (success bool)
+	// GetIssueLinkedPRNumber retrieves the number of a pull request linked to a specified issue
+	GetIssueLinkedPRNumber(org, repo, number string) (num int, success bool)
+}
+
+type robot struct {
+	cli iClient
+	cnf *configuration
+	log *logrus.Entry
+}
+
+func newRobot(c *configuration, token []byte) *robot {
+	logger := framework.NewLogger().WithField("component", component)
+	return &robot{cli: client.NewClient(token, logger), cnf: c, log: logger}
+}
+
+func (bot *robot) NewConfig() config.Configmap {
+	return &configuration{}
+}
+
+func (bot *robot) RegisterEventHandler(p framework.HandlerRegister) {
+	p.RegisterIssueCommentHandler(bot.handleCommentEvent)
+	p.RegisterPullRequestCommentHandler(bot.handleCommentEvent)
+}
+
+func (bot *robot) GetLogger() *logrus.Entry {
+	return bot.log
+}
+
+// getConfig first checks if the specified organization and repository is available in the provided repoConfig list.
+// Returns an error if not found the available repoConfig
+func (bot *robot) getConfig(cnf config.Configmap, org, repo string) (*repoConfig, error) {
+	c := cnf.(*configuration)
+	if bc := c.get(org, repo); bc != nil {
+		return bc, nil
+	}
+
+	return nil, errors.New("no config for this repo: " + org + "/" + repo)
+}
+
+var (
+	// the value from configuration.EventStateOpened
+	eventStateOpened = "opened"
+	// the value from configuration.EventStateClosed
+	eventStateClosed = "closed"
+	// the value from configuration.CommentNoPermissionOperateIssue
+	commentNoPermissionOperateIssue = ""
+	// the value from configuration.CommentIssueNeedsLinkPR
+	commentIssueNeedsLinkPR = ""
+	// the value from configuration.CommentListLinkingPullRequestsFailure
+	commentListLinkingPullRequestsFailure = ""
+	// the value from configuration.CommentNoPermissionOperatePR
+	commentNoPermissionOperatePR = ""
+)
+
+const (
+	// placeholderCommenter is a placeholder string for the commenter's name
+	placeholderCommenter = "__commenter__"
+	// placeholderAction is a placeholder string for the action
+	placeholderAction = "__action__"
+)
+
+var (
+	// regexpReopenComment is a compiled regular expression for reopening comments
+	regexpReopenComment = regexp.MustCompile(`(?mi)^/reopen\s*$`)
+	// regexpCloseComment is a compiled regular expression for closing comments
+	regexpCloseComment = regexp.MustCompile(`(?mi)^/close\s*$`)
+)
+
+func (bot *robot) handleCommentEvent(evt *client.GenericEvent, cnf config.Configmap) {
+	org, repo, number := utils.GetString(evt.Org), utils.GetString(evt.Repo), utils.GetString(evt.Number)
+	configmap, err := bot.getConfig(cnf, org, repo)
+	// If the specified repository not match any repository  in the repoConfig list, it logs the error and returns
+	if err != nil {
+		bot.log.WithError(err).Error()
+		return
+	}
+
+	// Checks if the event can be handled as a reopen event
+	if bot.handleReopenEvent(evt, org, repo, number) {
+		return
+	}
+
+	// Handles the close event
+	bot.handleCloseEvent(evt, configmap, org, repo, number)
+}
+
+// handleReopenEvent only handles the reopening of an issue event.
+// Handle completed, set the interrupt flag to interrupt the subsequent operations.
+func (bot *robot) handleReopenEvent(evt *client.GenericEvent, org, repo, number string) (interrupt bool) {
+	comment, state := utils.GetString(evt.Comment), utils.GetString(evt.State)
+	commenter, author := utils.GetString(evt.Commenter), utils.GetString(evt.Author)
+	// If the comment is on an issue and the comment matches the reopen comment and the state is closed
+	if utils.GetString(evt.CommentKind) == client.CommentOnIssue && regexpReopenComment.MatchString(comment) && state == eventStateClosed {
+		interrupt = true
+		// Check if the commenter has the permission to operate
+		if !bot.checkCommenterPermission(org, repo, author, commenter, func() {
+			bot.cli.CreateIssueComment(org, repo, number,
+				strings.ReplaceAll(strings.ReplaceAll(commentNoPermissionOperateIssue, placeholderCommenter, commenter), placeholderAction, "reopen"))
+		}) {
+			return
+		}
+
+		bot.cli.UpdateIssue(org, repo, number, eventStateOpened)
+	}
+	return
+}
+
+// handleCloseEvent  handles the closing of an issue or pull request event
+func (bot *robot) handleCloseEvent(evt *client.GenericEvent, configmap *repoConfig, org, repo, number string) {
+	comment, state := utils.GetString(evt.Comment), utils.GetString(evt.State)
+	commenter, author := utils.GetString(evt.Commenter), utils.GetString(evt.Author)
+	// If the comment matches the close comment and the state is opened
+	if regexpCloseComment.MatchString(comment) && state == eventStateOpened {
+		// Check if the commenter has the permission to operate
+		if !bot.checkCommenterPermission(org, repo, author, commenter, func() {
+			if utils.GetString(evt.CommentKind) == client.CommentOnIssue {
+				bot.cli.CreateIssueComment(org, repo, number,
+					strings.ReplaceAll(strings.ReplaceAll(commentNoPermissionOperateIssue, placeholderCommenter, commenter), placeholderAction, "close"))
+			} else {
+				bot.cli.CreatePRComment(org, repo, number,
+					strings.ReplaceAll(strings.ReplaceAll(commentNoPermissionOperatePR, placeholderCommenter, commenter), placeholderAction, "close"))
+			}
+		}) {
+			return
+		}
+
+		// If the comment kind is an pull request, update the pull request state to closed and return
+		if utils.GetString(evt.CommentKind) != client.CommentOnIssue {
+			bot.cli.UpdatePR(org, repo, number, eventStateClosed)
+			return
+		}
+
+		// Check if the issue needs linking to a pull request, and update the issue state to closed
+		bot.checkIssueNeedLinkingPR(configmap, org, repo, number, commenter)
+	}
+}
+
+// handleCloseEvent  handles the closing of an issue
+func (bot *robot) checkIssueNeedLinkingPR(configmap *repoConfig, org, repo, number, commenter string) {
+	if configmap.NeedIssueHasLinkPullRequests {
+		// issue can be closed only when its linking PR exists
+		num, success := bot.cli.GetIssueLinkedPRNumber(org, repo, number)
+		bot.log.Infof("list the issue[%s/%s,%s] linking PR number is successful: %v, number: %d", org, repo, number, success, num)
+		// If the request is failed that means not be sure to close issue, create a comment indicating do closing again and return
+		if !success {
+			bot.cli.CreateIssueComment(org, repo, number, strings.ReplaceAll(commentListLinkingPullRequestsFailure, placeholderCommenter, commenter))
+			return
+		}
+
+		// If the linked pull request number is zero, create a comment indicating that the issue needs a linked pull request and return
+		if num == 0 {
+			bot.cli.CreateIssueComment(org, repo, number, strings.ReplaceAll(commentIssueNeedsLinkPR, placeholderCommenter, commenter))
+			return
+		}
+	}
+
+	bot.cli.UpdateIssue(org, repo, number, eventStateClosed)
+}
+
+func (bot *robot) checkCommenterPermission(org, repo, author, commenter string, fn func()) (pass bool) {
+	if author == commenter {
+		return true
+	}
+	pass, success := bot.cli.CheckPermission(org, repo, commenter)
+	bot.log.Infof("request success: %t, the %s has permission to the repo[%s/%s]: %t", success, commenter, org, repo, pass)
+
+	if success && !pass {
+		fn()
+	}
+	return pass && success
+}
+
+
+========================
+
+	// Gather the necessary arguments from command line for project startup.
+
